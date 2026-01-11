@@ -1,43 +1,52 @@
 import streamlit as st
 from pypdf import PdfReader
 import re
-from pyaspeller import YandexSpeller
+# Попытка импорта для предотвращения ошибки, если библиотека еще не встала
+try:
+    from pyaspeller import YandexSpeller
+    AI_SPELLER_OK = True
+except ImportError:
+    AI_SPELLER_OK = False
 
-# --- 1. ФУНКЦИЯ ОЧИСТКИ (С УДАЛЕНИЕМ СНОСОК И КОЛОНТИТУЛОВ) ---
-def clean_text(raw_text):
+# --- 1. ФУНКЦИЯ ОЧИСТКИ ---
+def clean_text(raw_text, stop_phrases=None):
     if not raw_text:
         return ""
         
     lines = raw_text.split('\n')
     res = ""
     buf = ""
-    # Символы переноса
     hyphens = ['-', '\xad', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014']
+
+    # Подготовка списка стоп-фраз (приводим к нижнему регистру для поиска)
+    stop_phrases_lower = [p.lower().strip() for p in stop_phrases] if stop_phrases else []
 
     for line in lines:
         s = line.strip()
         if not s or s.isdigit(): 
             continue
 
-        # --- НОВЫЙ ФИЛЬТР: Удаляем колонтитулы и служебные строки ---
-        # Логика: если строка не заканчивается на знак препинания (. ! ? , ;)
-        # И ПРИ ЭТОМ начинается с большой буквы, И содержит цифры (например, год или номер)
-        # Мы считаем ее колонтитулом и пропускаем.
-        is_uppercase_start = s[0].isupper()
-        ends_with_punctuation = s.endswith(('.', '!', '?', ',', ';'))
+        # --- ФИЛЬТР 1: Пользовательские стоп-фразы ---
+        # Если строка содержит запрещенную фразу целиком
+        if any(phrase in s.lower() for phrase in stop_phrases_lower):
+            continue
+
+        # --- ФИЛЬТР 2: Авто-удаление служебных строк (Колонтитулы с цифрами) ---
+        # Пример: "Отечественные архивы. 2000. № 4"
+        is_upper = s[0].isupper()
+        ends_punct = s.endswith(('.', '!', '?', ',', ';', ':'))
         has_digits = any(char.isdigit() for char in s)
         
-        if is_uppercase_start and not ends_with_punctuation and has_digits:
-            # Это похоже на колонтитул, пропускаем
+        # Если начинается с Большой, есть цифры, но нет точки в конце — скорее всего мусор
+        if is_upper and not ends_punct and has_digits:
             continue
-        # ---------------------------------------------------------
-
-        # --- Удаление сносок (цифр в конце слов) ---
-        # 1. Убираем цифры, прилипшие к буквам (среде5 -> среде)
+            
+        # --- ФИЛЬТР 3: Сноски внутри строки ---
+        # Убираем цифры, прилипшие к словам (среде5 -> среде)
         s = re.sub(r'([а-яА-ЯёЁa-zA-Z])\d{1,3}\b', r'\1', s)
-        # 2. Убираем цифры, прилипшие к кавычкам (власти"5 -> власти")
         s = re.sub(r'([”"»])\d{1,3}\b', r'\1', s)
 
+        # --- ЛОГИКА СКЛЕЙКИ ---
         is_new = s[0].isupper() if s else False
         is_end = buf.endswith(('.', '!', '?'))
 
@@ -53,25 +62,30 @@ def clean_text(raw_text):
     return res + buf
 
 # --- 2. ИНТЕРФЕЙС ---
-st.set_page_config(page_title="PDF Pro Extractor", layout="wide")
-st.title("PDF Text Extractor Pro 3.1 (Final)")
+st.set_page_config(page_title="PDF Cleaner Pro", layout="wide")
+st.title("PDF Text Extractor Pro 4.0")
 
-# Боковая панель для настройки AI (если есть ключ)
+# --- БОКОВАЯ ПАНЕЛЬ ---
 with st.sidebar:
-    st.header("Настройки AI (Опционально)")
-    st.info("Код работает бесплатно. Но если у вас есть ключ OpenAI, вставьте его ниже для проверки смысла.")
-    openai_api_key = st.text_input("OpenAI API Key", type="password")
+    st.header("Настройки очистки")
+    st.write("Вставьте сюда повторяющиеся заголовки или мусор, который нужно удалить (каждую фразу с новой строки):")
+    stop_phrases_input = st.text_area("Черный список фраз", height=150, placeholder="Например:\nСтатьи и сообщения\nГлава\nОтечественные архивы")
+    
+    st.markdown("---")
+    st.header("AI Настройки")
+    openai_api_key = st.text_input("OpenAI API Key (необязательно)", type="password")
 
+# --- ОСНОВНАЯ ЧАСТЬ ---
 uploaded_file = st.file_uploader("Загрузите PDF файл", type="pdf")
 
 if uploaded_file is not None:
     pdf = PdfReader(uploaded_file)
     total_pages = len(pdf.pages)
     
-    st.write(f"📄 Страниц в документе: **{total_pages}**")
+    st.success(f"Файл загружен. Страниц: {total_pages}")
     
     # Режим
-    mode = st.radio("Режим обработки:", ["По номерам страниц", "По фразам (от и до)"], horizontal=True)
+    mode = st.radio("Режим:", ["По номерам страниц", "По фразам (от и до)"], horizontal=True)
     
     start_page = 1
     end_page = 1
@@ -81,119 +95,105 @@ if uploaded_file is not None:
     if mode == "По номерам страниц":
         c1, c2 = st.columns(2)
         with c1:
-            start_page = st.number_input("От стр", min_value=1, max_value=total_pages, value=1)
+            start_page = st.number_input("От стр", 1, total_pages, 1)
         with c2:
             default_end = min(start_page + 5, total_pages)
-            end_page = st.number_input("До стр", min_value=start_page, max_value=total_pages, value=default_end)
-            
+            end_page = st.number_input("До стр", start_page, total_pages, default_end)
     else: 
-        st.info("🔍 Поиск фразы по всему документу (может занять время для больших книг)")
+        st.info("Поиск фраз по всему документу")
         c1, c2 = st.columns(2)
         with c1:
-            start_phrase = st.text_input("Начало (фраза)")
+            start_phrase = st.text_input("Начало")
         with c2:
-            end_phrase = st.text_input("Конец (фраза)")
+            end_phrase = st.text_input("Конец")
 
     if 'generated_text' not in st.session_state:
         st.session_state.generated_text = ""
 
-    # --- КНОПКА ЗАПУСКА ---
-    if st.button("🚀 Извлечь и Очистить"):
+    # Кнопка запуска
+    if st.button("🚀 Извлечь текст"):
+        # Собираем список стоп-фраз из текстового поля
+        stop_list = stop_phrases_input.split('\n')
+        
         final_text = ""
         error_msg = ""
         
-        with st.spinner("Чтение и глубокая очистка..."):
-            # СЦЕНАРИЙ 1
+        with st.spinner("Обработка..."):
+            # 1. СБОР СЫРОГО ТЕКСТА
+            raw_full = ""
             if mode == "По номерам страниц":
-                raw_chunk = ""
                 for i in range(start_page - 1, end_page):
                     content = pdf.pages[i].extract_text()
-                    if content:
-                        raw_chunk += content + "\n"
-                final_text = clean_text(raw_chunk)
-
-            # СЦЕНАРИЙ 2
+                    if content: raw_full += content + "\n"
             else:
+                for page in pdf.pages:
+                    content = page.extract_text()
+                    if content: raw_full += content + "\n"
+
+            # 2. ОЧИСТКА (передаем черный список)
+            cleaned_full = clean_text(raw_full, stop_phrases=stop_list)
+
+            # 3. ОБРЕЗКА ПО ФРАЗАМ (если выбран этот режим)
+            if mode == "По фразам (от и до)":
                 if not start_phrase or not end_phrase:
-                    error_msg = "Введите обе фразы!"
+                    error_msg = "Введите обе фразы поиска!"
                 else:
-                    full_raw_text = ""
-                    for page in pdf.pages:
-                        full_raw_text += page.extract_text() + "\n"
-                    
-                    # Чистим весь текст ДО поиска, чтобы найти фразы даже если они были разорваны
-                    full_cleaned = clean_text(full_raw_text)
-                    
-                    idx_start = full_cleaned.lower().find(start_phrase.lower())
+                    idx_start = cleaned_full.lower().find(start_phrase.lower())
                     if idx_start == -1:
-                        error_msg = "❌ Начальная фраза не найдена."
+                        error_msg = "Начальная фраза не найдена."
                     else:
-                        idx_end = full_cleaned.lower().find(end_phrase.lower(), idx_start)
+                        idx_end = cleaned_full.lower().find(end_phrase.lower(), idx_start)
                         if idx_end == -1:
-                            error_msg = "❌ Конечная фраза не найдена (после начальной)."
+                            error_msg = "Конечная фраза не найдена."
                         else:
-                            final_text = full_cleaned[idx_start : idx_end + len(end_phrase)]
+                            final_text = cleaned_full[idx_start : idx_end + len(end_phrase)]
+            else:
+                final_text = cleaned_full
 
         if error_msg:
             st.error(error_msg)
         else:
             st.session_state.generated_text = final_text
 
-    # --- ВЫВОД ---
+    # ВЫВОД РЕЗУЛЬТАТА
     if st.session_state.generated_text:
-        text_to_show = st.session_state.generated_text
-        
-        # Статистика
-        chars_no_spaces = len(text_to_show.replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", ""))
-        pages_count = chars_no_spaces / 1725
+        txt = st.session_state.generated_text
+        chars = len(txt.replace(" ", "").replace("\n", "").replace("\r", ""))
+        pages = chars / 1725
         
         st.markdown("---")
-        st.subheader("Результат")
-        
         m1, m2 = st.columns(2)
-        m1.metric("Символов (без пробелов)", chars_no_spaces)
-        m2.metric("Страниц А4", f"{pages_count:.2f}")
+        m1.metric("Символов (без пробелов)", chars)
+        m2.metric("Страниц А4", f"{pages:.2f}")
 
-        # ПАНЕЛЬ ИНСТРУМЕНТОВ AI
-        col_tools1, col_tools2 = st.columns(2)
-        
-        with col_tools1:
-            if st.button("✨ Исправить опечатки (Бесплатно/Yandex)"):
-                with st.spinner("Проверка орфографии..."):
-                    speller = YandexSpeller()
-                    fixed = speller.spelled(text_to_show)
-                    st.session_state.generated_text = fixed
-                    st.success("Орфография исправлена!")
-                    st.rerun()
+        # Кнопки AI
+        c_tools1, c_tools2 = st.columns(2)
+        with c_tools1:
+            if AI_SPELLER_OK:
+                if st.button("✨ Исправить опечатки (Yandex)"):
+                    with st.spinner("Работаю..."):
+                        speller = YandexSpeller()
+                        st.session_state.generated_text = speller.spelled(txt)
+                        st.success("Готово!")
+                        st.rerun()
+            else:
+                st.warning("Библиотека pyaspeller не найдена. Обновите requirements.txt!")
 
-        with col_tools2:
+        with c_tools2:
             if openai_api_key:
-                if st.button("🧠 Проверить адекватность (GPT)"):
+                if st.button("🧠 AI Рерайт (GPT)"):
                     try:
                         from openai import OpenAI
                         client = OpenAI(api_key=openai_api_key)
-                        with st.spinner("Нейросеть читает и правит текст..."):
-                            response = client.chat.completions.create(
-                                model="gpt-4o-mini", 
-                                messages=[
-                                    {"role": "system", "content": "Ты профессиональный редактор. Твоя задача: исправить пунктуацию, стиль и смысловые ошибки в тексте, полученном из PDF. Убери мусор, склей разрывы, сделай текст читаемым, но сохрани смысл."},
-                                    {"role": "user", "content": text_to_show}
-                                ]
+                        with st.spinner("AI думает..."):
+                            resp = client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[{"role": "user", "content": f"Исправь ошибки и стиль: {txt}"}]
                             )
-                            st.session_state.generated_text = response.choices[0].message.content
-                            st.success("Текст обработан нейросетью!")
+                            st.session_state.generated_text = resp.choices[0].message.content
                             st.rerun()
                     except Exception as e:
-                        st.error(f"Ошибка API: {e}")
-            else:
-                st.button("🧠 Проверить адекватность (GPT)", disabled=True, help="Введите API ключ слева в меню")
+                        st.error(f"Ошибка: {e}")
 
-        # Текстовое поле
-        st.text_area("Готовый текст", st.session_state.generated_text, height=600)
-        
-        st.download_button(
-            label="💾 Скачать результат (.txt)",
-            data=st.session_state.generated_text,
-            file_name="extracted_text.txt",
-            mime="text/plain"
-        )
+        st.text_area("Результат", st.session_state.generated_text, height=600)
+        st.download_button("💾 Скачать .txt", st.session_state.generated_text, "text.txt")
