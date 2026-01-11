@@ -1,7 +1,9 @@
 import streamlit as st
 from pypdf import PdfReader
+import io
 
-# Попытка импорта для OCR
+# Попытка импорта библиотек для OCR (распознавания текста с картинок)
+# Если их нет, программа не сломается, просто отключит эту функцию.
 try:
     import pytesseract
     from pdf2image import convert_from_bytes
@@ -9,114 +11,103 @@ try:
 except ImportError:
     OCR_OK = False
 
-# --- 1. ФУНКЦИЯ ОЧИСТКИ ---
+# --- 1. ФУНКЦИЯ ОЧИСТКИ ТЕКСТА (ИСПРАВЛЕННАЯ) ---
 def clean_text(raw_text):
+    if not raw_text:
+        return ""
+        
     lines = raw_text.split('\n')
     res = ""
     buf = ""
+    
+    # Список символов переноса: обычный минус, мягкий перенос (\xad) и разные тире
+    hyphens = ['-', '\xad', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014']
+
     for line in lines:
         s = line.strip()
-        if not s or s.isdigit(): continue
+        # Пропускаем пустые строки и номера страниц (если строка - просто число)
+        if not s or s.isdigit(): 
+            continue
 
+        # Проверка: начинается ли новая строка с большой буквы
         is_new = s[0].isupper() if s else False
+        # Проверка: заканчивается ли буфер знаками препинания
         is_end = buf.endswith(('.', '!', '?'))
 
+        # Логика разделения абзацев
         if (is_end and is_new) and buf:
             res += buf + "\n\n"
             buf = s
         else:
-            if buf.endswith('-'): buf = buf[:-1] + s
-            else: buf += " " + s if buf else s
+            # Если предыдущая строка заканчивается на перенос - склеиваем без пробела
+            if any(buf.endswith(h) for h in hyphens):
+                buf = buf[:-1] + s
+            else:
+                # Иначе склеиваем через пробел
+                buf += " " + s
+                
     return res + buf
 
-# --- 2. ЗАГРУЗКА PDF ---
-def get_pdf_content(file, pages, ocr):
+# --- 2. ФУНКЦИЯ ЧТЕНИЯ PDF ---
+def get_pdf_content(file_bytes, use_ocr=False):
     text = ""
-    # Если OCR включен И библиотеки найдены
-    if ocr and OCR_OK:
+    
+    # Если выбран OCR и библиотеки установлены
+    if use_ocr and OCR_OK:
         try:
-            imgs = convert_from_bytes(file.read())
-            file.seek(0)
-            for i in pages:
-                if i < len(imgs):
-                    text += pytesseract.image_to_string(imgs[i], lang='rus+eng') + "\n"
+            # Конвертируем PDF в картинки
+            images = convert_from_bytes(file_bytes)
+            # Распознаем текст с каждой картинки
+            for img in images:
+                text += pytesseract.image_to_string(img, lang='rus+eng') + "\n"
         except Exception as e:
-            return f"Ошибка OCR: {e}. Попробуйте отключить галочку OCR."
-    else:
-        # Обычный режим (или если OCR недоступен)
-        reader = PdfReader(file)
-        for i in pages:
-            if i < len(reader.pages):
-                t = reader.pages[i].extract_text()
-                text += t if t else ""
+            st.error(f"Ошибка OCR: {e}. Пробую обычный метод...")
+            # Если OCR упал, пробуем обычный метод ниже
+            use_ocr = False
+
+    # Обычный метод (извлечение текстового слоя)
+    if not use_ocr:
+        pdf = PdfReader(io.BytesIO(file_bytes))
+        for page in pdf.pages:
+            content = page.extract_text()
+            if content:
+                text += content + "\n"
+                
     return text
 
-# --- 3. ИНТЕРФЕЙС ---
-st.set_page_config(page_title="PDF Tool")
-st.title("PDF Master")
+# --- 3. ИНТЕРФЕЙС (STREAMLIT) ---
+st.title("PDF Text Extractor & Cleaner")
 
-f = st.file_uploader("PDF файл", type="pdf")
+uploaded_file = st.file_uploader("Загрузите PDF файл", type="pdf")
 
-if f:
-    reader = PdfReader(f)
-    n_pages = len(reader.pages)
-    st.write(f"Страниц: {n_pages}")
+if uploaded_file is not None:
+    # Читаем файл в память
+    file_bytes = uploaded_file.read()
+    
+    # Настройки в боковой панели
+    st.sidebar.header("Настройки")
+    
+    # Чекбокс для OCR (доступен только если библиотеки установлены)
+    use_ocr = st.sidebar.checkbox("Использовать OCR (для сканов)", value=False, disabled=not OCR_OK)
+    if not OCR_OK:
+        st.sidebar.warning("OCR недоступен (нет библиотек tesseract/poppler)")
 
-    # Выбор режима
-    mode = st.radio("Режим:", ["Страницы", "Фразы"], horizontal=True)
-
-    # Настройки
-    p1 = st.number_input("От стр", 1, n_pages, 1)
-    p2 = st.number_input("До стр", 1, n_pages, n_pages)
-
-    ph1 = ""
-    ph2 = ""
-    if mode == "Фразы":
-        ph1 = st.text_input("Начало (фраза)")
-        ph2 = st.text_input("Конец (фраза)")
-
-    # Если библиотеки OCR не найдены, галочка будет неактивна или с пометкой
-    ocr_label = "OCR (скан)" if OCR_OK else "OCR (недоступно на сервере)"
-    use_ocr = st.checkbox(ocr_label, disabled=not OCR_OK)
-
-    st.divider()
-    c1, c2 = st.columns([3, 1])
-
-    do_run = False
-    do_reset = False
-
-    with c1:
-        if st.button("СТАРТ", type="primary"):
-            do_run = True
-
-    with c2:
-        if st.button("СБРОС"):
-            do_reset = True
-
-    if do_reset:
-        st.rerun()
-
-    if do_run:
-        pgs = [i-1 for i in range(p1, p2+1)]
-        # Добавляем спиннер, чтобы было видно процесс
+    if st.button("Обработать файл"):
         with st.spinner("Обработка..."):
-            raw = get_pdf_content(f, pgs, use_ocr)
-
-        if not raw:
-            st.error("Пусто! Возможно, это картинка без текстового слоя.")
-        elif "Ошибка OCR" in raw:
-             st.error(raw)
-        else:
-            final = clean_text(raw)
-
-            if mode == "Фразы" and ph1 and ph2:
-                i1 = final.find(ph1)
-                i2 = final.find(ph2, i1)
-                if i1 != -1 and i2 != -1:
-                    final = final[i1 : i2 + len(ph2)]
-                else:
-                    final = "Фразы не найдены."
-
-            st.text_area("Итог", final, height=400)
-            chars = len(final.replace(" ", ""))
-            st.info(f"Зн: {chars} | A4: {chars/1725:.2f}")
+            # 1. Извлекаем сырой текст
+            raw_text = get_pdf_content(file_bytes, use_ocr=use_ocr)
+            
+            # 2. Чистим текст
+            cleaned_text = clean_text(raw_text)
+            
+            # 3. Показываем результат
+            st.subheader("Результат:")
+            st.text_area("Текст", cleaned_text, height=400)
+            
+            # 4. Кнопка скачивания
+            st.download_button(
+                label="Скачать результат (.txt)",
+                data=cleaned_text,
+                file_name="cleaned_text.txt",
+                mime="text/plain"
+            )
