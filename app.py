@@ -3,7 +3,7 @@ from pypdf import PdfReader
 import re
 from pyaspeller import YandexSpeller
 
-# --- 1. ФУНКЦИЯ ОЧИСТКИ (С УДАЛЕНИЕМ СНОСОК) ---
+# --- 1. ФУНКЦИЯ ОЧИСТКИ (С УДАЛЕНИЕМ СНОСОК И КОЛОНТИТУЛОВ) ---
 def clean_text(raw_text):
     if not raw_text:
         return ""
@@ -19,11 +19,20 @@ def clean_text(raw_text):
         if not s or s.isdigit(): 
             continue
 
-        # --- НОВОЕ: УДАЛЕНИЕ СНОСОК (ЦИФР В КОНЦЕ СЛОВ) ---
-        # Логика: если слово заканчивается на букву, за которой идут 1-3 цифры (например "среде5" или "власти12")
-        # Мы заменяем это просто на слово без цифр.
-        # r'\1' означает "оставить только букву, найденную в первой группе"
+        # --- НОВЫЙ ФИЛЬТР: Удаляем колонтитулы и служебные строки ---
+        # Логика: если строка не заканчивается на знак препинания (. ! ? , ;)
+        # И ПРИ ЭТОМ начинается с большой буквы, И содержит цифры (например, год или номер)
+        # Мы считаем ее колонтитулом и пропускаем.
+        is_uppercase_start = s[0].isupper()
+        ends_with_punctuation = s.endswith(('.', '!', '?', ',', ';'))
+        has_digits = any(char.isdigit() for char in s)
         
+        if is_uppercase_start and not ends_with_punctuation and has_digits:
+            # Это похоже на колонтитул, пропускаем
+            continue
+        # ---------------------------------------------------------
+
+        # --- Удаление сносок (цифр в конце слов) ---
         # 1. Убираем цифры, прилипшие к буквам (среде5 -> среде)
         s = re.sub(r'([а-яА-ЯёЁa-zA-Z])\d{1,3}\b', r'\1', s)
         # 2. Убираем цифры, прилипшие к кавычкам (власти"5 -> власти")
@@ -45,7 +54,7 @@ def clean_text(raw_text):
 
 # --- 2. ИНТЕРФЕЙС ---
 st.set_page_config(page_title="PDF Pro Extractor", layout="wide")
-st.title("PDF Text Extractor Pro 3.0")
+st.title("PDF Text Extractor Pro 3.1 (Final)")
 
 # Боковая панель для настройки AI (если есть ключ)
 with st.sidebar:
@@ -93,7 +102,7 @@ if uploaded_file is not None:
         final_text = ""
         error_msg = ""
         
-        with st.spinner("Чтение и очистка сносок..."):
+        with st.spinner("Чтение и глубокая очистка..."):
             # СЦЕНАРИЙ 1
             if mode == "По номерам страниц":
                 raw_chunk = ""
@@ -165,7 +174,7 @@ if uploaded_file is not None:
                         client = OpenAI(api_key=openai_api_key)
                         with st.spinner("Нейросеть читает и правит текст..."):
                             response = client.chat.completions.create(
-                                model="gpt-4o-mini", # Дешевая и быстрая модель
+                                model="gpt-4o-mini", 
                                 messages=[
                                     {"role": "system", "content": "Ты профессиональный редактор. Твоя задача: исправить пунктуацию, стиль и смысловые ошибки в тексте, полученном из PDF. Убери мусор, склей разрывы, сделай текст читаемым, но сохрани смысл."},
                                     {"role": "user", "content": text_to_show}
