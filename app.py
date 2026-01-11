@@ -1,17 +1,7 @@
 import streamlit as st
 from pypdf import PdfReader
-import io
 
-# Попытка импорта библиотек для OCR (распознавания текста с картинок)
-# Если их нет, программа не сломается, просто отключит эту функцию.
-try:
-    import pytesseract
-    from pdf2image import convert_from_bytes
-    OCR_OK = True
-except ImportError:
-    OCR_OK = False
-
-# --- 1. ФУНКЦИЯ ОЧИСТКИ ТЕКСТА (ИСПРАВЛЕННАЯ) ---
+# --- ФУНКЦИЯ ОЧИСТКИ ТЕКСТА ---
 def clean_text(raw_text):
     if not raw_text:
         return ""
@@ -19,95 +9,100 @@ def clean_text(raw_text):
     lines = raw_text.split('\n')
     res = ""
     buf = ""
-    
-    # Список символов переноса: обычный минус, мягкий перенос (\xad) и разные тире
+    # Символы, которые считаем переносами
     hyphens = ['-', '\xad', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014']
 
     for line in lines:
         s = line.strip()
-        # Пропускаем пустые строки и номера страниц (если строка - просто число)
         if not s or s.isdigit(): 
             continue
 
-        # Проверка: начинается ли новая строка с большой буквы
         is_new = s[0].isupper() if s else False
-        # Проверка: заканчивается ли буфер знаками препинания
         is_end = buf.endswith(('.', '!', '?'))
 
-        # Логика разделения абзацев
         if (is_end and is_new) and buf:
             res += buf + "\n\n"
             buf = s
         else:
-            # Если предыдущая строка заканчивается на перенос - склеиваем без пробела
             if any(buf.endswith(h) for h in hyphens):
                 buf = buf[:-1] + s
             else:
-                # Иначе склеиваем через пробел
                 buf += " " + s
                 
     return res + buf
 
-# --- 2. ФУНКЦИЯ ЧТЕНИЯ PDF ---
-def get_pdf_content(file_bytes, use_ocr=False):
-    text = ""
-    
-    # Если выбран OCR и библиотеки установлены
-    if use_ocr and OCR_OK:
-        try:
-            # Конвертируем PDF в картинки
-            images = convert_from_bytes(file_bytes)
-            # Распознаем текст с каждой картинки
-            for img in images:
-                text += pytesseract.image_to_string(img, lang='rus+eng') + "\n"
-        except Exception as e:
-            st.error(f"Ошибка OCR: {e}. Пробую обычный метод...")
-            # Если OCR упал, пробуем обычный метод ниже
-            use_ocr = False
+# --- ИНТЕРФЕЙС ---
+st.title("PDF Text Extractor")
 
-    # Обычный метод (извлечение текстового слоя)
-    if not use_ocr:
-        pdf = PdfReader(io.BytesIO(file_bytes))
-        for page in pdf.pages:
-            content = page.extract_text()
-            if content:
-                text += content + "\n"
-                
-    return text
-
-# --- 3. ИНТЕРФЕЙС (STREAMLIT) ---
-st.title("PDF Text Extractor & Cleaner")
-
+# 1. Загрузка
 uploaded_file = st.file_uploader("Загрузите PDF файл", type="pdf")
 
 if uploaded_file is not None:
-    # Читаем файл в память
-    file_bytes = uploaded_file.read()
+    # Читаем PDF (но пока не обрабатываем текст)
+    pdf = PdfReader(uploaded_file)
+    total_pages = len(pdf.pages)
     
-    # Настройки в боковой панели
-    st.sidebar.header("Настройки")
+    st.write(f"Всего страниц в документе: {total_pages}")
     
-    # Чекбокс для OCR (доступен только если библиотеки установлены)
-    use_ocr = st.sidebar.checkbox("Использовать OCR (для сканов)", value=False, disabled=not OCR_OK)
-    if not OCR_OK:
-        st.sidebar.warning("OCR недоступен (нет библиотек tesseract/poppler)")
-
-    if st.button("Обработать файл"):
-        with st.spinner("Обработка..."):
-            # 1. Извлекаем сырой текст
-            raw_text = get_pdf_content(file_bytes, use_ocr=use_ocr)
+    # 2. Выбор режима (как на скриншоте)
+    mode = st.radio("Режим:", ["Страницы", "Поиск по фразе"], horizontal=True)
+    
+    start_page = 1
+    end_page = 1
+    search_phrase = ""
+    
+    # Настройки в зависимости от режима
+    if mode == "Страницы":
+        col1, col2 = st.columns(2)
+        with col1:
+            start_page = st.number_input("От стр", min_value=1, max_value=total_pages, value=1)
+        with col2:
+            default_end = min(start_page + 5, total_pages)
+            end_page = st.number_input("До стр", min_value=start_page, max_value=total_pages, value=default_end)
             
-            # 2. Чистим текст
+    else: # Режим фразы
+        search_phrase = st.text_input("Введите фразу для поиска страниц")
+
+    # 3. Кнопка запуска (ТЕПЕРЬ ТЕКСТ ПОЯВИТСЯ ТОЛЬКО ПОСЛЕ НАЖАТИЯ)
+    if st.button("Получить текст"):
+        
+        raw_text = ""
+        st.info("Обработка началась...")
+        
+        # ЛОГИКА ОБРАБОТКИ
+        if mode == "Страницы":
+            # Просто берем диапазон
+            for i in range(start_page - 1, end_page):
+                page_content = pdf.pages[i].extract_text()
+                if page_content:
+                    raw_text += page_content + "\n"
+                    
+        else: # Режим фразы
+            if search_phrase:
+                # Ищем фразу на всех страницах
+                found_count = 0
+                for i, page in enumerate(pdf.pages):
+                    content = page.extract_text()
+                    if content and search_phrase.lower() in content.lower():
+                        raw_text += f"\n--- Страница {i+1} ---\n"
+                        raw_text += content + "\n"
+                        found_count += 1
+                
+                if found_count == 0:
+                    st.warning("Фраза не найдена.")
+            else:
+                st.warning("Введите фразу.")
+
+        # Очистка и вывод (если текст найден)
+        if raw_text:
             cleaned_text = clean_text(raw_text)
             
-            # 3. Показываем результат
             st.subheader("Результат:")
-            st.text_area("Текст", cleaned_text, height=400)
+            st.text_area("Текст", cleaned_text, height=600)
             
-            # 4. Кнопка скачивания
             st.download_button(
                 label="Скачать результат (.txt)",
                 data=cleaned_text,
-                file_name="cleaned_text.txt",
+                file_name="result.txt",
                 mime="text/plain"
             )
